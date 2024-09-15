@@ -85,7 +85,7 @@ def random_forest_model(data_lbls, labels, abs_path, checkpoint_dir):
                     try:
                         features.append(extractor.execute(img, mask))
                     except ValueError:
-                        print(scan, "has an empty segmentation mask. The segmentation mask for the following week will be used.") #Value:'Patient-023_week-024_reg_0000.nii.gz'
+                        print(scan, "has an empty segmentation mask. The segmentation mask for the following week will be used.")
                         to_remove.append(abs_path + paths["followup_registered"] + "/" + scan)
     
     # create dataframe and add the labels as a column
