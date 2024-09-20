@@ -131,7 +131,7 @@ def train_model(data, data_labels, json_f, checkpoint_dir):
     
     # set up model parameters
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    epochs = 1
+    epochs = 40
     num_classes = 4
     learning_rate = 0.001
 
