@@ -4,6 +4,7 @@ from pathlib import Path
 import cnn
 import pickle
 import json
+import numpy as np
 import SimpleITK as sitk
 from radiomics import featureextractor
 import shutil
@@ -13,9 +14,10 @@ def predict(checkpoint_dir, test_data_dir, output_data_dir):
     ''' load cnn & rf model to run inference '''
     model = cnn.CNN(classes=4)
     model.load_state_dict(torch.load(checkpoint_dir + "/model.pth", weights_only=True))
+    model.to("cuda")
     model.eval()
     
-    with open(checkpoint_dir + "rf.pickle", 'rb') as f:
+    with open(checkpoint_dir + "/rf.pickle", 'rb') as f:
         rf = pickle.load(f)
         
     shutil.copyfile(test_data_dir + "/patients.json", output_data_dir + "/predictions.json")
@@ -43,7 +45,7 @@ def predict(checkpoint_dir, test_data_dir, output_data_dir):
             for case, paths in patients[1].items():
                 patient_case.append(patients[0] + "-" + case)
                 #Read the image as an array
-                img = sitk.ReadImage(test_data_dir + paths["followup_registered"] + paths["followup_registered"].split("/Patient")[1] + "_0002.nii.gz", imageIO="NiftiImageIO")
+                img = sitk.ReadImage(f"{test_data_dir}/{paths['followup_registered'][1:]}/{paths['followup_registered'].split('/')[-1]}_0002.nii.gz", imageIO="NiftiImageIO")
                 img_array = sitk.GetArrayFromImage(sitk.DICOMOrient(img, 'LPS'))
                 
                 # convert to tensor
@@ -61,28 +63,43 @@ def predict(checkpoint_dir, test_data_dir, output_data_dir):
                 if img_array.dtype == torch.float64:
                     img_array = img_array.to(torch.float32)
                 
-                output = model(img_array)
-                
-                # get the prediction probs
-                output = torch.exp(output)
-                prob_sums = torch.sum(output, dim=1, keepdim=True)
-                output /= prob_sums  
-                
-                cnn_output.append(output) 
-    
+                # catch errors due to too small images
+                try:
+                    output = model(img_array)
+                    
+                    # get the prediction probs
+                    output = torch.exp(output)
+                    prob_sums = torch.sum(output, dim=1, keepdim=True)
+                    output /= prob_sums
+                except RuntimeError:
+                    output = torch.full((1, 4), 0.25, dtype=torch.float32, device="cuda")
+
+                cnn_output.append(output.cpu().numpy())
+
+
     df = pd.DataFrame.from_dict(x for x in features)
     cols = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     rf_input = df.drop(df.columns[cols], axis=1)
 
-    rf_output = rf.predict(rf_input)
-                
+    # predict probabilities from random forest model
+    rf_intermediate = rf.predict_proba(rf_input)
+    # if model has less than 4 classes, add zeros to the output
+    rf_output = np.zeros((len(rf_intermediate), 4), rf_intermediate.dtype)
+    for i, cls in enumerate(rf.classes_):
+        rf_output[:, cls] = rf_intermediate[:, i]
+
+    cnn_output = np.array(cnn_output).reshape(-1, 4)
+    rf_output = np.array(rf_output).reshape(-1, 4)
+
+    ensemble_output = np.mean([np.round(cnn_output, 2), np.round(rf_output, 2)], axis=0)
+
     with open(output_data_dir + "/predictions.json", "r+") as output:
-                data = json.load(output)
-                for i in range(len(cnn_output)):
-                    data[patient_case[i].split("-")[0]][patient_case[i].split("-")[1]] = { "response": [ round((x+y)/2, 2) for x,y in zip([ round(k, 2) for k in cnn_output[i] ], [ round(j, 2) for j in rf_output[i] ]) ] }
-                    output.seek(0)
-                    json.dump(data, output, indent=4)
-                    output.truncate()           
+        data = json.load(output)
+        for i in range(len(cnn_output)):
+            data[patient_case[i].split("-")[0]][patient_case[i].split("-")[1]] = {"response": np.round(ensemble_output[i], 2).tolist()}
+            output.seek(0)
+            json.dump(data, output, indent=4)
+            output.truncate()           
 
 
 def main():
